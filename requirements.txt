@@ -1,4 +1,5 @@
 torch>=2.8
+torchvision>=0.23
 numpy>=2.2
 xarray>=2025.6
 zarr>=3.1

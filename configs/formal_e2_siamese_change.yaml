@@ -1,0 +1,22 @@
+experiment: formal_e2_siamese_change
+seed: 42
+data_root: data/raw
+train_split: train
+val_split: val
+input_mode: e2
+model: siamese_change_unet
+batch_size: 32
+epochs: 12
+learning_rate: 0.001
+base_channels: 16
+pos_weight: 2.0
+max_train_samples: null
+max_val_samples: null
+num_workers: 4
+loss:
+  type: bce_dice
+  bce_weight: 1.0
+  dice_weight: 1.0
+  boundary_weight: 1.0
+  boundary_kernel_size: 5
+output_dir: outputs/formal_e2_siamese_change

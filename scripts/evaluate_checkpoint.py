@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from src.data import CHANNELS,ImpactMeshDataset
 from src.metrics import binary_metrics
-from src.model import UNet
+from src.model import build_model
 
 
 def boundary_counts(prediction, target, tolerance=2):
@@ -33,7 +33,7 @@ def main():
     cfg=yaml.safe_load(Path(args.config).read_text(encoding="utf-8")); names=None
     if args.sample_list: names=[x.strip() for x in Path(args.sample_list).read_text(encoding="utf-8").splitlines() if x.strip()]
     ds=ImpactMeshDataset(cfg["data_root"],args.split,cfg["input_mode"],sample_names=names); loader=DataLoader(ds,batch_size=cfg["batch_size"],num_workers=cfg["num_workers"],pin_memory=True)
-    device=torch.device("cuda" if torch.cuda.is_available() else "cpu"); state=torch.load(Path(cfg["output_dir"])/"best.pt",map_location=device,weights_only=False);model=UNet(CHANNELS[cfg["input_mode"]],cfg["base_channels"]).to(device);model.load_state_dict(state["model"]);model.eval(); counts=defaultdict(lambda:np.zeros(4));boundary=np.zeros(4,dtype=np.float64)
+    device=torch.device("cuda" if torch.cuda.is_available() else "cpu"); state=torch.load(Path(cfg["output_dir"])/"best.pt",map_location=device,weights_only=False);model=build_model(cfg.get("model","unet"),CHANNELS[cfg["input_mode"]],cfg["base_channels"]).to(device);model.load_state_dict(state["model"]);model.eval(); counts=defaultdict(lambda:np.zeros(4));boundary=np.zeros(4,dtype=np.float64)
     with torch.no_grad():
         for x,y,samples in loader:
             x=x.to(device)

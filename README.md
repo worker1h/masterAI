@@ -48,3 +48,30 @@ conda run -n daily python scripts\validate_submission.py
 
 - `formal_e2_imbalance_boundary.yaml`：分洪水占比重采样 + Focal/Tversky + 边界带加权。该组合用于验证“重复正类补偿”的风险，不能默认视为改进。
 - `formal_e2_boundary_precision.yaml`：保留原始图块分布，将正类权重从 4.0 降为 2.0，并仅在五像素边界带上提高 BCE 权重，用于降低误报并改善边缘定位。
+
+## 模型结构改进
+
+`siamese_change_unet` 将 E2 的灾前、灾中双极化 SAR 分别送入共享编码器，并在四个尺度融合灾中语义特征与绝对时相差异，再由 U-Net 解码器恢复洪水边界。它与上一节的类别权重和边界带损失组合使用。
+
+固定 seed 42 的正式实验中，validation IoU 为 0.5968；562 个未见事件 holdout 图块上的 IoU/Dice/Boundary F1 为 0.5342/0.6964/0.5524，原 E2 对应为 0.4941/0.6614/0.5329。当前未继续运行其他随机种子，结果应视为单种子结构验证。
+
+```powershell
+conda run -n daily python -m src.train --config configs\formal_e2_siamese_change.yaml
+conda run -n daily python scripts\evaluate_checkpoint.py --config configs\formal_e2_siamese_change.yaml --split test --sample-list data\split\impactmesh_flood_test_holdout.txt --name test_holdout
+```
+
+设计与完整对照见 `docs/模型结构改进实验报告.md`，机器可读结果见 `docs/model_structure_results.csv`。
+
+## 轻量分割模型与 SpaceNet 8 参考实验
+
+项目已在不增加 Python 依赖的前提下接入 `deeplabv3plus_mobilenet` 和原生 `segformer_b0`，并保持 seed 42、完整 train/val、12 epoch 与同一损失设置。单模型 holdout IoU 分别为 0.5130 和 0.5268，均未超过 `siamese_change_unet` 的 0.5342；SegFormer-B0 的 Boundary F1 0.5542 为单模型最高。
+
+按 SpaceNet 8 获奖方案的异构集成思路，仅在 validation 选择组合后评估一次 holdout。等权 `SiameseChangeUNet + DeepLabV3+` 达到当前最高 holdout IoU 0.5409、Dice 0.7020，但正事件宏 IoU 和推理效率仍以单 Siamese 更优。
+
+```powershell
+conda run -n daily python -m src.train --config configs\formal_e2_deeplabv3plus.yaml
+conda run -n daily python -m src.train --config configs\formal_e2_segformer_b0.yaml
+conda run -n daily python scripts\evaluate_ensemble.py --configs configs\formal_e2_siamese_change.yaml configs\formal_e2_deeplabv3plus.yaml --split test --sample-list data\split\impactmesh_flood_test_holdout.txt --name test_holdout --output-dir outputs\ensemble_siamese_deeplab
+```
+
+完整分析见 `docs/轻量分割模型与SpaceNet8参考实验报告.md`。

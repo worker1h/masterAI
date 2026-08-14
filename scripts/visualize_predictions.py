@@ -6,7 +6,7 @@ import torch
 import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.data import CHANNELS, ImpactMeshDataset
-from src.model import UNet
+from src.model import build_model
 
 
 def main():
@@ -14,7 +14,7 @@ def main():
     cfg=yaml.safe_load(Path(args.config).read_text(encoding="utf-8")); names=None
     if args.sample_list: names=[x.strip() for x in Path(args.sample_list).read_text(encoding="utf-8").splitlines() if x.strip()]
     ds=ImpactMeshDataset(cfg["data_root"],args.split or cfg["val_split"],cfg["input_mode"],args.limit,sample_names=names)
-    device=torch.device("cuda" if torch.cuda.is_available() else "cpu"); model=UNet(CHANNELS[cfg["input_mode"]],cfg["base_channels"]).to(device)
+    device=torch.device("cuda" if torch.cuda.is_available() else "cpu"); model=build_model(cfg.get("model","unet"),CHANNELS[cfg["input_mode"]],cfg["base_channels"]).to(device)
     state=torch.load(args.checkpoint,map_location=device,weights_only=False); model.load_state_dict(state["model"]); model.eval()
     out=Path(cfg["output_dir"])/"predictions"; out.mkdir(parents=True,exist_ok=True)
     with torch.no_grad():
