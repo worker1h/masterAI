@@ -3,7 +3,7 @@ import torch
 from src.data import CHANNELS,ImpactMeshDataset
 from src.losses import boundary_band, segmentation_loss
 from src.metrics import binary_metrics
-from src.model import UNet
+from src.model import DeepLabV3PlusMobileNet, SegFormerB0, SiameseChangeUNet, UNet, build_model
 from src.sampling import balanced_bin_weights, flood_fraction_bins
 from scripts.evaluate_checkpoint import boundary_counts
 
@@ -42,6 +42,28 @@ class PipelineTests(unittest.TestCase):
         target=torch.zeros(1,1,16,16,dtype=torch.bool);target[:,:,4:12,4:12]=True
         mp,npred,mt,ntrue=boundary_counts(target,target,tolerance=2)
         self.assertEqual(mp,npred);self.assertEqual(mt,ntrue)
+
+    def test_siamese_change_unet_shape_and_factory(self):
+        model=build_model("siamese_change_unet",4,8)
+        x=torch.randn(2,4,64,64)
+        self.assertEqual(tuple(model(x).shape),(2,1,64,64))
+        self.assertIsInstance(model,SiameseChangeUNet)
+
+    def test_siamese_rejects_non_temporal_input(self):
+        with self.assertRaises(ValueError):
+            SiameseChangeUNet(2,8)
+
+    def test_lightweight_model_shapes_and_factory(self):
+        x=torch.randn(2,4,64,64)
+        cases={
+            "deeplabv3plus_mobilenet": DeepLabV3PlusMobileNet,
+            "segformer_b0": SegFormerB0,
+        }
+        for name,expected_type in cases.items():
+            with self.subTest(model=name):
+                model=build_model(name,4,8)
+                self.assertEqual(tuple(model(x).shape),(2,1,64,64))
+                self.assertIsInstance(model,expected_type)
 
 
 if __name__=="__main__": unittest.main()

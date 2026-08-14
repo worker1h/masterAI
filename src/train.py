@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 from .data import CHANNELS, ImpactMeshDataset
 from .losses import segmentation_loss
 from .metrics import binary_metrics
-from .model import UNet
+from .model import build_model
 from .sampling import make_flood_fraction_sampler
 
 
@@ -64,7 +64,7 @@ def main():
     train_loader=DataLoader(train_ds,batch_size=cfg["batch_size"],shuffle=sampler is None,sampler=sampler,num_workers=cfg["num_workers"],pin_memory=torch.cuda.is_available())
     val_loader=DataLoader(val_ds,batch_size=cfg["batch_size"],shuffle=False,num_workers=cfg["num_workers"],pin_memory=torch.cuda.is_available())
     device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model=UNet(CHANNELS[cfg["input_mode"]],cfg["base_channels"]).to(device)
+    model=build_model(cfg.get("model","unet"),CHANNELS[cfg["input_mode"]],cfg["base_channels"]).to(device)
     opt=torch.optim.AdamW(model.parameters(),lr=cfg["learning_rate"])
     scaler=torch.amp.GradScaler("cuda",enabled=device.type=="cuda")
     rows=[]; best=-1.0

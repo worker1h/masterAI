@@ -10,7 +10,7 @@ import yaml
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from src.data import CHANNELS,ImpactMeshDataset
 from src.metrics import binary_metrics
-from src.model import UNet
+from src.model import build_model
 
 
 EXPERIMENTS=[("E0","configs/stage1_e0.yaml"),("E1","configs/stage1_e1.yaml"),("E2","configs/stage1_e2.yaml"),("E3","configs/stage1_e3.yaml")]
@@ -18,7 +18,7 @@ EXPERIMENTS=[("E0","configs/stage1_e0.yaml"),("E1","configs/stage1_e1.yaml"),("E
 
 def load(name,config_path,device):
     cfg=yaml.safe_load(Path(config_path).read_text(encoding="utf-8")); ckpt=torch.load(Path(cfg["output_dir"])/"best.pt",map_location=device,weights_only=False)
-    model=UNet(CHANNELS[cfg["input_mode"]],cfg["base_channels"]).to(device); model.load_state_dict(ckpt["model"]); model.eval()
+    model=build_model(cfg.get("model","unet"),CHANNELS[cfg["input_mode"]],cfg["base_channels"]).to(device); model.load_state_dict(ckpt["model"]); model.eval()
     run=json.loads((Path(cfg["output_dir"])/"run.json").read_text(encoding="utf-8")); events=set(run["held_out_events"])
     all_ds=ImpactMeshDataset(cfg["data_root"],cfg["val_split"],cfg["input_mode"]); names=[n for n in all_ds.names if n.split("_",1)[0] in events]
     ds=ImpactMeshDataset(cfg["data_root"],cfg["val_split"],cfg["input_mode"],sample_names=names)
