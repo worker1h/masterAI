@@ -1,0 +1,30 @@
+experiment: e2_imbalance_boundary_smoke
+seed: 42
+data_root: data/raw
+train_split: val
+val_split: val
+val_event_fraction: 0.25
+input_mode: e2
+batch_size: 4
+epochs: 2
+learning_rate: 0.001
+base_channels: 8
+pos_weight: 4.0
+max_train_samples: 64
+max_val_samples: 32
+num_workers: 0
+sampling:
+  strategy: flood_fraction_bins
+  cache_workers: 4
+  thresholds: [0.0, 0.01, 0.10]
+  target_probabilities: [0.20, 0.25, 0.30, 0.25]
+loss:
+  type: focal_tversky
+  focal_gamma: 2.0
+  focal_weight: 1.0
+  tversky_weight: 1.0
+  tversky_alpha: 0.60
+  tversky_beta: 0.40
+  boundary_weight: 2.0
+  boundary_kernel_size: 5
+output_dir: outputs/e2_imbalance_boundary_smoke

@@ -1,0 +1,15 @@
+experiment: e3
+seed: 42
+data_root: data/raw
+train_split: train
+val_split: val
+input_mode: e3
+batch_size: 12
+epochs: 50
+learning_rate: 0.0003
+base_channels: 32
+max_train_samples: null
+max_val_samples: null
+num_workers: 4
+output_dir: outputs/e3
+

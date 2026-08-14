@@ -1,0 +1,15 @@
+.venv/
+data/raw/
+outputs/
+output/
+tmp/
+__pycache__/
+*.pyc
+*.log
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
