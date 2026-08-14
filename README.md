@@ -11,7 +11,7 @@ conda run -n daily python scripts\inspect_data.py --data-root data\raw --split v
 conda run -n daily python -m src.train --config configs\e0_smoke.yaml
 ```
 
-正式实验将配置改为 `configs/e0.yaml`、`e1.yaml`、`e2.yaml`、`e3.yaml`。数据归档来自官方 Hugging Face 仓库，解包后目录应为 `data/raw/<split>/<modality>/*.zarr.zip`。
+正式消融实验使用 `configs/formal_e0.yaml`、`formal_e1.yaml`、`formal_e2.yaml`、`formal_e3.yaml`；`configs/e0.yaml` 至 `e3.yaml` 保留为更大训练预算的扩展配置。数据归档来自官方 Hugging Face 仓库，解包后目录应为 `data/raw/<split>/<modality>/*.zarr.zip`。
 
 ## 实验定义
 
