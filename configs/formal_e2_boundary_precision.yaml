@@ -1,0 +1,23 @@
+experiment: formal_e2_boundary_precision
+seed: 42
+data_root: data/raw
+train_split: train
+val_split: val
+input_mode: e2
+batch_size: 32
+epochs: 12
+learning_rate: 0.001
+base_channels: 16
+# The original value 4.0 already produced high recall. A lower value avoids
+# double compensation while still weighting the 8.5% positive pixels.
+pos_weight: 2.0
+max_train_samples: null
+max_val_samples: null
+num_workers: 4
+loss:
+  type: bce_dice
+  bce_weight: 1.0
+  dice_weight: 1.0
+  boundary_weight: 1.0
+  boundary_kernel_size: 5
+output_dir: outputs/formal_e2_boundary_precision

@@ -1,0 +1,15 @@
+experiment: e0_smoke
+seed: 42
+data_root: data/raw
+train_split: val
+val_split: val
+input_mode: e0
+batch_size: 2
+epochs: 3
+learning_rate: 0.001
+base_channels: 16
+max_train_samples: 16
+max_val_samples: 8
+val_event_fraction: 0.25
+num_workers: 0
+output_dir: outputs/e0_smoke
