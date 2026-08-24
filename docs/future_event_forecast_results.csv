@@ -1,0 +1,7 @@
+method,uses_future_training,selected_threshold,val_iou,test_iou,test_dice,test_precision,test_recall,test_accuracy,conclusion
+all_flood,false,1.0,,0.2367817561,0.3828998203,0.2367817561,1.0000000000,0.2367817561,trivial_baseline
+oracle_previous_mask,false,0.5,,0.4753524497,0.6443917178,0.7586351129,0.5600529502,0.8536376953,unavailable_oracle_input
+mapped_previous_flood,false,0.35,0.1259422543,0.4469907321,0.6178211404,0.6394685898,0.5975913303,0.8249402046,best_available_persistence_baseline
+directional_forecast_from_scratch,true,0.5,0.1104884939,0.3884912455,0.5595876052,0.5273973579,0.5959628167,0.7778793971,worse_than_persistence
+pretrained_residual_forecast,true,0.35,0.1144398312,0.4091916966,0.5807466756,0.6300131987,0.5386265172,0.8158567746,worse_than_persistence
+conservative_full_finetune,true,0.35,0.1259422543,0.4469907321,0.6178211404,0.6394685898,0.5975913303,0.8249402046,epoch_0_selected_no_learning_gain

@@ -10,7 +10,7 @@ import torch.nn.functional as F
 import yaml
 from torch.utils.data import DataLoader
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from src.data import CHANNELS,ImpactMeshDataset
+from src.data import CHANNELS,FutureEventForecastDataset,ImpactMeshDataset
 from src.metrics import binary_metrics
 from src.model import build_model
 
@@ -32,8 +32,11 @@ def main():
     ap=argparse.ArgumentParser();ap.add_argument("--config",required=True);ap.add_argument("--split",default="test");ap.add_argument("--sample-list");ap.add_argument("--name",default="test");args=ap.parse_args()
     cfg=yaml.safe_load(Path(args.config).read_text(encoding="utf-8")); names=None
     if args.sample_list: names=[x.strip() for x in Path(args.sample_list).read_text(encoding="utf-8").splitlines() if x.strip()]
-    ds=ImpactMeshDataset(cfg["data_root"],args.split,cfg["input_mode"],sample_names=names); loader=DataLoader(ds,batch_size=cfg["batch_size"],num_workers=cfg["num_workers"],pin_memory=True)
-    device=torch.device("cuda" if torch.cuda.is_available() else "cpu"); state=torch.load(Path(cfg["output_dir"])/"best.pt",map_location=device,weights_only=False);model=build_model(cfg.get("model","unet"),CHANNELS[cfg["input_mode"]],cfg["base_channels"]).to(device);model.load_state_dict(state["model"]);model.eval(); counts=defaultdict(lambda:np.zeros(4));boundary=np.zeros(4,dtype=np.float64)
+    if cfg.get("task") == "future_event_forecast": ds=FutureEventForecastDataset(cfg["manifest"],args.split)
+    else: ds=ImpactMeshDataset(cfg["data_root"],args.split,cfg["input_mode"],sample_names=names)
+    loader=DataLoader(ds,batch_size=cfg["batch_size"],num_workers=cfg["num_workers"],pin_memory=True)
+    input_channels=int(cfg.get("input_channels",CHANNELS[cfg["input_mode"]]))
+    device=torch.device("cuda" if torch.cuda.is_available() else "cpu"); state=torch.load(Path(cfg["output_dir"])/"best.pt",map_location=device,weights_only=False);model=build_model(cfg.get("model","unet"),input_channels,cfg["base_channels"]).to(device);model.load_state_dict(state["model"]);model.eval(); counts=defaultdict(lambda:np.zeros(4));boundary=np.zeros(4,dtype=np.float64)
     with torch.no_grad():
         for x,y,samples in loader:
             x=x.to(device)

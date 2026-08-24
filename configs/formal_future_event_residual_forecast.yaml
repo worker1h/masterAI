@@ -1,0 +1,28 @@
+experiment: formal_future_event_residual_forecast
+task: future_event_forecast
+manifest: data/split/future_event_forecast_manifest.json
+seed: 42
+data_root: data/raw
+train_split: train
+val_split: val
+input_mode: e2
+input_channels: 4
+model: historical_flood_residual_forecast_net
+init_checkpoint: outputs/formal_e2_siamese_presence_refine/best.pt
+trainable_prefixes:
+  - forecast_residual
+batch_size: 16
+epochs: 20
+learning_rate: 0.001
+base_channels: 16
+pos_weight: 2.0
+num_workers: 4
+loss:
+  type: bce_dice
+  bce_weight: 1.0
+  dice_weight: 1.0
+  boundary_weight: 1.0
+  boundary_kernel_size: 5
+  presence_weight: 0.0
+  boundary_aux_weight: 0.0
+output_dir: outputs/formal_future_event_residual_forecast

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import numpy as np
 import torch
@@ -87,3 +88,75 @@ class ImpactMeshDataset(Dataset):
         # Only class 2 is the transient flood target; permanent water is negative.
         mask = (np.nan_to_num(mask) == 2).astype(np.float32)
         return torch.from_numpy(x), torch.from_numpy(mask), name
+
+
+class FutureEventForecastDataset(Dataset):
+    """Historical pre/event SAR mosaics paired with the next flood-event mask."""
+
+    def __init__(self, manifest_path, partition):
+        manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+        self.samples = [sample for sample in manifest["samples"] if sample["partition"] == partition]
+        if not self.samples:
+            raise FileNotFoundError(
+                f"No future-event forecast samples for partition {partition!r} in {manifest_path}"
+            )
+
+    def __len__(self):
+        return len(self.samples)
+
+    @staticmethod
+    def _historical_sar(path):
+        raw = np.asarray(_read_zarr(Path(path)), dtype=np.float32)
+        if raw.ndim == 4:
+            sar = raw.reshape(raw.shape[0] * raw.shape[1], raw.shape[2], raw.shape[3])
+        else:
+            sar = _to_chw(raw)
+        if sar.shape[0] < 6:
+            raise ValueError(f"Expected four S1 time observations in {path}")
+        return np.concatenate([sar[2:4], sar[4:6]], axis=0)
+
+    def __getitem__(self, index):
+        sample = self.samples[index]
+        height = width = 256
+        channels = 4
+        accumulated = np.zeros((channels, height, width), dtype=np.float32)
+        counts = np.zeros((1, height, width), dtype=np.float32)
+        channel_means = np.tile(S1_MEAN[:, 0, 0], 2)[:, None, None]
+        for tile in sample["history_tiles"]:
+            sar = self._historical_sar(tile["s1_path"])
+            sar = np.where(np.isfinite(sar), sar, channel_means)
+            row_offset = int(tile["row_offset"])
+            column_offset = int(tile["column_offset"])
+            target_row_start = max(0, row_offset)
+            target_column_start = max(0, column_offset)
+            target_row_end = min(height, row_offset + sar.shape[1])
+            target_column_end = min(width, column_offset + sar.shape[2])
+            if target_row_end <= target_row_start or target_column_end <= target_column_start:
+                continue
+            source_row_start = target_row_start - row_offset
+            source_column_start = target_column_start - column_offset
+            source_row_end = source_row_start + target_row_end - target_row_start
+            source_column_end = source_column_start + target_column_end - target_column_start
+            target_slice = (
+                slice(None),
+                slice(target_row_start, target_row_end),
+                slice(target_column_start, target_column_end),
+            )
+            source_slice = (
+                slice(None),
+                slice(source_row_start, source_row_end),
+                slice(source_column_start, source_column_end),
+            )
+            accumulated[target_slice] += sar[source_slice]
+            counts[
+                :,
+                target_row_start:target_row_end,
+                target_column_start:target_column_end,
+            ] += 1
+        raw_mosaic = np.broadcast_to(channel_means, accumulated.shape).copy()
+        np.divide(accumulated, counts, out=raw_mosaic, where=counts > 0)
+        inputs = _normalize_s1(raw_mosaic).astype(np.float32)
+        with rasterio.open(sample["future_mask_path"]) as source:
+            mask = source.read(1).astype(np.float32)[None]
+        target = (np.nan_to_num(mask) == 2).astype(np.float32)
+        return torch.from_numpy(inputs), torch.from_numpy(target), sample["future_name"]
