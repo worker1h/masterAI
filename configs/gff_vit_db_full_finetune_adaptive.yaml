@@ -1,0 +1,59 @@
+seed: 1337
+output_dir: outputs/gff_vit_db_full_finetune_adaptive
+
+data:
+  root: data/gff
+  fold: 0
+  horizons: [1, 2, 3]
+  weather_window: 20
+  tile_size: 224
+  context_size: 16
+  context_buffer_m: 50000
+  forcing_mode: causal
+  augment: true
+  sar_preprocessing: sunet_db
+  sar_db_ranges: [[-25.0, 0.0], [-32.0, -5.0]]
+  clahe_clip_limit: 2.0
+  clahe_grid_size: 8
+  clahe_enhancement_size: 256
+  max_train_tiles: null
+  max_val_tiles: 2000
+  max_test_tiles: 2000
+
+model:
+  name: vit_b_16
+  pretrained: true
+  freeze_blocks: 6
+  temporal_dim: 128
+  temporal_depth: 3
+
+sampling:
+  positive_tile_ratio: 0.5
+
+loss:
+  pos_weight: 4.0
+  focal_gamma: 2.0
+  focal_weight: 1.0
+  dice_weight: 1.0
+  boundary_weight: 0.2
+  boundary_pos_weight: 3.0
+  presence_weight: 0.15
+
+postprocessing:
+  probability_normalization: adaptive_low_confidence_minmax
+  confidence_statistic: valid_quantile
+  confidence_quantile: 0.99
+  confidence_gate_candidates: [0.01, 0.02, 0.03, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4]
+  raw_threshold: 0.3
+  normalized_threshold: 0.75
+
+batch_size: 4
+gradient_accumulation: 4
+num_workers: 4
+epochs: 2
+save_epoch_checkpoints: true
+learning_rate: 0.00003
+backbone_learning_rate: 0.000003
+weight_decay: 0.01
+threshold: 0.3
+threshold_candidates: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]

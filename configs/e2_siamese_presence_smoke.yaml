@@ -1,0 +1,24 @@
+experiment: e2_siamese_presence_smoke
+seed: 42
+data_root: data/raw
+train_split: val
+val_split: val
+val_event_fraction: 0.25
+input_mode: e2
+model: siamese_change_unet_presence
+batch_size: 4
+epochs: 2
+learning_rate: 0.001
+base_channels: 8
+pos_weight: 2.0
+max_train_samples: 64
+max_val_samples: 32
+num_workers: 0
+loss:
+  type: bce_dice
+  bce_weight: 1.0
+  dice_weight: 1.0
+  boundary_weight: 1.0
+  boundary_kernel_size: 5
+  presence_weight: 0.25
+output_dir: outputs/e2_siamese_presence_smoke
