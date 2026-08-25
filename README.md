@@ -1,191 +1,308 @@
 # 洪析先知：GFF 未来洪水范围预测
 
-当前主任务使用 Global Flood Forecasting（GFF）数据，在同一事件的目标时刻前 24/48/72 小时预测新增洪水范围。模型输入不含目标时刻 SAR：空间分支只读取灾前 Sentinel-1、DEM 和 HAND，时间分支读取 20 天 ERA5、ERA5-Land 与 GloFAS 强迫序列；目标是 GFF 标注中的 flooded 类（类别 2），永久水体不是正类。
+本项目使用 Global Flood Forecasting（GFF）数据，根据灾前 Sentinel-1 SAR、地形以及发布时刻之前的气象水文信息，预测目标地区未来 24、48 或 72 小时的暂态洪水范围。
 
-需要注意：GFF 发布的是再分析数据，不是带 forecast issue time 的历史业务预报。正式配置使用严格因果模式：目标日前最后 1/2/3 天的再分析全部屏蔽，模型只读取 issue time 之前的数据，不会看到真实未来强迫。项目保留 `forcing_mode: perfect` 作为“把再分析当作零误差预报”的上界，但不把它当作主结果。实时上线仍应把被屏蔽时段替换为发布时刻可用的 ECMWF/GloFAS 预报并重新训练或微调。
+当前主模型为 `GFFViTHorizonFormer`：空间分支采用 ImageNet 预训练 ViT-B/16 和 U 形卷积解码器，时间分支采用气象水文 Transformer，并通过预见期条件和特征调制融合两类信息。
 
-## GFF 下载与训练
+> GFF 提供的是再分析数据，不是带历史预报发布时间的业务预报归档。本项目的 `causal` 模式会屏蔽目标时刻前最后 1/2/3 天的再分析值，以模拟 24/48/72h 发布时刻。实际部署时仍需接入发布时刻真正可用的 ECMWF/GloFAS 预报并重新训练或微调。
 
-- 官方记录与说明：[GFF v3（Zenodo 14184289）](https://zenodo.org/records/14184289)
-- 数据集 DOI：[10.5281/zenodo.14184289](https://doi.org/10.5281/zenodo.14184289)
-- Zenodo API 清单：[record 14184289 API](https://zenodo.org/api/records/14184289)
-- 数据论文配套代码：[Multihuntr/gff](https://github.com/Multihuntr/gff)
+## 1. 任务定义
 
-项目只下载当前模型使用的 `base + s1 + dem + hand + era5 + glofas`，不下载 HydroATLAS、WorldCover 和 extras。下载器支持多连接、断点续传、官方 MD5 校验和安全解压：
+对于每个空间瓦片和预见期 `h ∈ {1, 2, 3}`，模型学习：
 
-```powershell
-conda run -n daily --no-capture-output python scripts\download_gff.py --root data\gff --components base glofas dem hand era5 s1 --workers 24 --part-mb 16
-conda run -n daily --no-capture-output python -m src.train_gff --config configs\gff_horizonformer_smoke.yaml
-conda run -n daily --no-capture-output python -m src.train_gff --config configs\gff_horizonformer.yaml
-conda run -n daily --no-capture-output python scripts\select_gff_checkpoint.py --config configs\gff_horizonformer.yaml --checkpoints outputs\gff_horizonformer\epoch1.pt outputs\gff_horizonformer\epoch2.pt outputs\gff_horizonformer\epoch3.pt outputs\gff_horizonformer\epoch4.pt outputs\gff_horizonformer\epoch5.pt outputs\gff_horizonformer\epoch6.pt
-conda run -n daily --no-capture-output python scripts\predict_gff_example.py --config configs\gff_horizonformer.yaml --checkpoint outputs\gff_horizonformer\best.pt --horizon 3 --output outputs\gff_horizonformer\prediction_72h.png
+```text
+灾前 VV/VH SAR + DEM + HAND + 截止发布时刻可见的20天气象水文序列
+                                ↓
+             预测 h×24 小时后的 flooded 类范围
 ```
 
-`GFFHorizonFormer` 由 MiT-B0 空间 Transformer、日尺度气象/水文时序 Transformer、horizon token、逐尺度 FiLM 融合和 SegFormer 解码器构成。训练阶段用 50% 正洪水瓦片重采样、Focal-BCE + Dice 解决类别不平衡，并用独立边界头约束细窄和不规则边缘。数据按官方流域 fold 划分：fold 0 测试、fold 1 验证、fold 2–4 训练，避免空间泄漏。
+- 目标：GFF floodmap 中的类别 2（`flooded`）。
+- 非目标：背景和永久水体；永久水体不计作新增/暂态洪水。
+- 模型输入不包含目标时刻 Sentinel-1 影像。
+- 真实 floodmap 只在训练和评估时作为标签。
+- 每个地理瓦片复制为 24h、48h、72h 三个训练样本。
 
-正式固定种子子集实验的最佳权重来自第 6 轮，验证集选择阈值 0.3。独立测试集 24/48/72 小时 IoU 分别为 0.0423/0.0442/0.0440，宏 IoU 0.0435、宏 Dice 0.0834。该结果是严格因果、3,000/500/500 瓦片的研究基线，尚不足以代表完整数据训练或业务可用性能。
+## 2. 数据来源与目录格式
 
-完整任务定义、数据审计、结构说明和实验限制见 [`docs/GFF_HorizonFormer实验报告.md`](docs/GFF_HorizonFormer实验报告.md)。
+- [GFF v3 数据记录](https://zenodo.org/records/14184289)
+- [数据集 DOI：10.5281/zenodo.14184289](https://doi.org/10.5281/zenodo.14184289)
+- [GFF 配套代码](https://github.com/Multihuntr/gff)
 
-## SU-Net 启发的 SAR 增强与 ViT 模型
-
-新配置 `gff_vit_sunet.yaml` 参考 SU-Net 对 ISAR 图像保留原图并加入 CLAHE 增强图的做法，但针对 GFF 的 Sentinel-1 线性后向散射先做物理上合理的 dB 转换和固定范围裁剪。空间输入因此变为 `VV dB + VH dB + VV CLAHE + VH CLAHE + DEM + HAND` 六通道。模型使用 ImageNet 预训练 ViT-B/16 建模全局空间关系，并以卷积 U 形跳连恢复洪水边界；原有严格因果天气 Transformer、24/48/72h horizon 条件、类别均衡采样、Focal-Dice、边界头和存在性头全部保留。
-
-SU-Net 原本用于非合作航天器 ISAR 位姿估计，本项目只迁移其双视图预处理思想，并不是复现 SU-Net 的任务或网络。依据见 [SU-Net 论文](https://www.nature.com/articles/s41598-023-38974-1) 与 [官方代码](https://github.com/Tombs98/SU-Net)。
-
-```powershell
-conda run -n daily --no-capture-output python -m src.train_gff --config configs\gff_vit_sunet_smoke.yaml
-conda run -n daily --no-capture-output python -m src.train_gff --config configs\gff_vit_sunet.yaml
-conda run -n daily --no-capture-output python scripts\select_gff_checkpoint.py --config configs\gff_vit_sunet.yaml --checkpoints outputs\gff_vit_sunet\epoch1.pt outputs\gff_vit_sunet\epoch2.pt outputs\gff_vit_sunet\epoch3.pt outputs\gff_vit_sunet\epoch4.pt
-conda run -n daily --no-capture-output python scripts\predict_gff_example.py --config configs\gff_vit_sunet.yaml --checkpoint outputs\gff_vit_sunet\best.pt --horizon 3 --output outputs\gff_vit_sunet\prediction_72h.png
-```
-
-只运行这一版完整闭环也可使用 `scripts\run_gff_vit_sunet_experiment.ps1`。正式对照仍使用相同的 seed 1337、严格因果输入和 3,000/500/500 瓦片，避免把输入规模变化误认为架构收益。
-
-正式四轮统一验证校准选择第 3 轮、阈值 0.5，独立测试宏 IoU 0.0350、宏 Dice 0.0677，低于 MiT 基线的 0.0435/0.0834。预先固定阈值 0.3 的第 2 轮测试可达到 0.0477/0.0911，但不能在查看 test 后改用这组较好数字作为主结果；差异说明小子集 ViT 存在明显跨流域概率标定漂移。完整结果、失败案例和最佳案例见 [`docs/GFF_ViT_SU-Net实验报告.md`](docs/GFF_ViT_SU-Net实验报告.md)。
-
-已完成 Standard、仅 dB、仅 CLAHE、dB + CLAHE 双视图四组受控消融。每组均联合扫描 4 个 epoch 与验证阈值，并且 test 只用于最终报告。验证集最终选择 **仅 dB**：validation/test Macro IoU 为 **0.0443/0.0508**，test Macro Dice 为 **0.0967**；双视图对应 0.0437/0.0350/0.0677。当前证据表明收益主要来自物理 dB 表达，CLAHE 双视图在小样本预算下没有额外泛化收益。完整表格、选择偏差说明和对比图见 [`docs/GFF_SU-Net预处理消融实验报告.md`](docs/GFF_SU-Net预处理消融实验报告.md)。
+当前模型只需要 `base`、`s1`、`dem`、`hand`、`era5` 和 `glofas` 六个组件：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\run_gff_sunet_ablation.ps1
+conda run -n daily --no-capture-output python scripts\download_gff.py `
+  --root data\gff `
+  --components base glofas dem hand era5 s1 `
+  --workers 24 `
+  --part-mb 16
 ```
 
-消融胜出的 dB-only 模型随后从最佳检查点出发，在 fold 2–4 的全部 98,853 个训练瓦片上完成 2 个 epoch 微调；验证/测试各固定 2,000 个瓦片。验证集联合选择第 2 轮、阈值 0.3，测试 24/48/72h IoU 为 **0.0631/0.0633/0.0633**，Macro IoU/Dice 为 **0.0632/0.1189**。该实验的评估子集大于消融实验，不能把两组数值当作严格配对增益。配置和一键脚本分别为 `configs/gff_vit_db_full_finetune.yaml` 与 `scripts/run_gff_vit_db_full_finetune.ps1`。
+下载器支持断点续传、多连接下载、官方 MD5 校验和安全解压。解压后的核心目录为：
 
-已增加逐热度图有效像素 min–max 归一化后再阈值化的可选后处理，validation 重新选择第 2 轮、阈值 0.75。其 validation/test Macro IoU 为 0.0492/0.0918，测试 Macro Dice 为 0.1682；同一默认 72h 漏检样例的 IoU 从 0 提高到 0.8102。由于 validation 反而低于原始概率方案，且测试边界 F1 从 0.0641 降至 0.0194，该方案只作为概率尺度漂移诊断保留，不能根据已经查看的 test 结果替换正式主结果。配置与结果见 `configs/gff_vit_db_full_finetune_per_heatmap.yaml`、`outputs/gff_vit_db_full_finetune_per_heatmap/run.json` 和 [`docs/GFF_SU-Net预处理消融实验报告.md`](docs/GFF_SU-Net预处理消融实验报告.md)。
-
-进一步实现了仅对低置信度热度图归一化的自适应方案：以有效像素 `q99` 判断整体置信度，validation 选择分流门限 0.01；约 28.43% 的 test 图使用 min–max + 0.75，其余直接使用原始概率 + 0.30。该方案 validation/test Macro IoU 为 0.0558/0.0682，Test Dice 0.1276，边界 F1 0.0641。它缓解了全部归一化造成的边界退化，但 validation 仍未超过全部原始方案的 0.0588，故保留为可选后处理。配置为 `configs/gff_vit_db_full_finetune_adaptive.yaml`。
-
-也可一键执行下载校验、数据审计、测试、smoke、正式子集训练和预测示例：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\run_gff_experiment.ps1
+```text
+data/gff/
+├── downloads/                 # 下载的原始 ZIP 与分片
+├── normalisation/             # 各数据源均值/标准差 CSV
+├── partitions/                # 官方五折流域划分
+│   ├── floodmap_partition_0.txt
+│   └── ...
+└── rois/                      # 每个洪水站点的空间与时间数据
+    ├── <site>-meta.json
+    ├── <visit_tiles>.gpkg
+    ├── <floodmap>.tif
+    ├── <key>-<pre_date>-s1.tif
+    ├── <site>-dem-local.tif
+    ├── <site>-hand.tif
+    ├── <site>-era5.nc
+    ├── <site>-era5-land.nc
+    └── <key>_<post_date>.nc
 ```
 
-## 旧版 ImpactMesh 灾中制图实验
+### 2.1 原始文件含义
 
-仓库仍保留旧实验的代码、权重结果和报告，原始 ImpactMesh 数据已从工作目录移除。以下章节记录历史灾中制图结果，不代表当前未来预测任务。
+| 文件 | 格式 | 内容 |
+|---|---|---|
+| `*-meta.json` | JSON | 站点标识、日期和各组件文件名 |
+| `*.gpkg` | GeoPackage | 瓦片边界及背景、永久水体、洪水像素计数 |
+| floodmap | GeoTIFF | `0=背景`、`1=永久水体`、`2=暂态洪水` |
+| `*-s1.tif` | 双波段 GeoTIFF | 灾前 Sentinel-1 VV、VH 线性后向散射 |
+| `*-dem-local.tif` | GeoTIFF | 数字高程模型 DEM |
+| `*-hand.tif` | GeoTIFF | Height Above Nearest Drainage |
+| `*-era5.nc` | NetCDF | ERA5 日尺度气象变量 |
+| `*-era5-land.nc` | NetCDF | ERA5-Land 地表与土壤变量 |
+| `*.nc`（GloFAS） | NetCDF | 河流流量、径流和土壤含水相关变量 |
 
-原阶段一实现了 ImpactMesh-Flood 数据核验、E0-E3 输入消融、U-Net 二分类分割、IoU/Dice/Precision/Recall/F1 评估、checkpoint 与可视化归档。
+### 2.2 数据划分
 
-## 快速开始
+代码直接使用 GFF 官方流域 fold，避免相邻区域同时出现在训练和测试中：
+
+| 用途 | Fold | 当前完整实验规模 |
+|---|---|---:|
+| Train | 2、3、4 | 98,853 个瓦片 / 296,559 个瓦片×时效样本 |
+| Validation | 1 | 固定 2,000 个瓦片 / 6,000 个样本 |
+| Test | 0 | 固定 2,000 个瓦片 / 6,000 个样本 |
+
+## 3. 模型实际接收的数据格式
+
+`GFFFloodForecastDataset` 返回一个字典。单样本形状如下：
+
+| 字段 | dtype / 形状 | 是否输入模型 | 含义 |
+|---|---|---:|---|
+| `spatial` | `float32 [4,224,224]` | 是 | `VV dB + VH dB + DEM + HAND` |
+| `weather` | `float32 [20,26,16,16]` | 是 | 最近 20 天的 ERA5、ERA5-Land、GloFAS 上下文 |
+| `horizon` | `int64 []` | 是 | `1/2/3`，对应 24/48/72h |
+| `forecast_mask` | `bool [20]` | 是 | 指示被屏蔽的未来时段 |
+| `target` | `float32 [1,224,224]` | 否 | 类别 2 的二值洪水标签 |
+| `valid` | `float32 [1,224,224]` | 否 | 有效标签像素掩膜 |
+| `boundary` | `float32 [1,224,224]` | 否 | 由标签通过 5×5 形态学运算生成的边界监督 |
+| `presence` | `float32 []` | 否 | 瓦片内是否存在洪水 |
+| `site` | `str` | 否 | GFF 站点名称 |
+| `bounds` | `float64 [4]` | 否 | 瓦片投影坐标边界 |
+
+批处理后，模型接口为：
+
+```python
+outputs = model(
+    spatial,       # [B, 4, 224, 224]
+    weather,       # [B, 20, 26, 16, 16]
+    horizon,       # [B]
+    forecast_mask, # [B, 20]
+)
+```
+
+## 4. 输入预处理
+
+### 4.1 Sentinel-1 SAR
+
+当前正式配置使用 `sunet_db`，只保留 VV/VH 的物理 dB 表达，不加入 CLAHE 通道：
+
+1. 将线性后向散射转换为 `10·log10(x)`；
+2. VV 裁剪到 `[-25, 0] dB`；
+3. VH 裁剪到 `[-32, -5] dB`；
+4. 分别线性映射到 `[-1, 1]`。
+
+因此当前空间输入固定为四通道，而不是 SU-Net 双视图实验中的六通道。
+
+### 4.2 地形与气象水文数据
+
+- DEM、HAND 按官方 fold 对应的均值和标准差标准化。
+- 动态数据使用目标区域外扩 50 km 的上下文，重采样为 16×16。
+- 所有动态变量按官方统计量标准化，并裁剪到 `[-6, 6]`。
+- 26 个动态通道由 9 个 ERA5、14 个 ERA5-Land 和 3 个 GloFAS 变量组成。
+
+主要变量包括气温、露点、降水、气压、风、四层土壤水分、辐射、雪水当量、潜在蒸发、河流流量、径流和土壤含水状态。
+
+### 4.3 严格因果屏蔽
+
+在 `forcing_mode: causal` 下：
+
+- 24h：最后 1 天动态数据置为标准化后的气候均值 0；
+- 48h：最后 2 天置 0；
+- 72h：最后 3 天置 0。
+
+`forecast_mask` 同时标记这些位置，时间 Transformer 可以区分真实历史观测与被屏蔽时段。
+
+### 4.4 训练增强
+
+训练集同步应用空间水平/垂直翻转、90°旋转，以及 SAR 增益和高斯噪声扰动。所有空间数据和标签采用相同几何变换。
+
+## 5. 当前模型结构
+
+```mermaid
+flowchart LR
+    S[VV/VH dB + DEM + HAND<br/>4×224×224] --> V[ViT-B/16<br/>14×14 patch tokens]
+    S --> K[卷积跳连<br/>224 / 112 / 56]
+
+    W[20天 × 26通道<br/>16×16] --> C[逐日卷积编码器]
+    H[24/48/72h token<br/>+ forecast mask] --> T[3层时间 Transformer]
+    C --> T
+
+    V --> F[FiLM 特征调制]
+    T --> F
+    F --> D[U形解码器<br/>14→28→56→112→224]
+    K --> D
+
+    D --> M[洪水分割 logits]
+    D --> B[边界 logits]
+    V --> P[洪水存在性 logits]
+    T --> P
+```
+
+### 5.1 空间分支
+
+- Backbone：ImageNet 预训练 `ViT-B/16`。
+- 输入：四通道 224×224 张量。
+- Patch：16×16，形成 14×14 个空间 token。
+- 预训练 RGB patch projection 通过通道均值扩展到四通道。
+- 前 6 个 ViT block 冻结，后续 block 和任务头参与微调。
+- 额外卷积路径保留 224、112、56 三个尺度的局部纹理和边界信息。
+
+### 5.2 时间分支
+
+- 每天的 `[26,16,16]` 动态场先由卷积编码器压缩为一个 128 维 token。
+- 加入序列位置编码、观测/屏蔽状态 embedding 和预见期 embedding。
+- 使用 3 层、4 头 Transformer Encoder 建模 20 天时序。
+- horizon token 的最终表示作为全局气象水文上下文。
+
+### 5.3 时空融合与解码
+
+- 时间上下文通过 Feature-wise Linear Modulation（FiLM）调制 ViT token 和多级解码特征。
+- U 形解码器逐级恢复 28、56、112、224 分辨率。
+- 56/112/224 层分别融合卷积跳连，以恢复细窄和不规则洪水边界。
+- 当前模型共约 89.17M 参数。
+
+### 5.4 输出头
+
+模型返回：
+
+```python
+{
+    "segmentation": Tensor[B, 1, 224, 224],
+    "boundary":     Tensor[B, 1, 224, 224],
+    "presence":     Tensor[B],
+}
+```
+
+最终洪水概率使用瓦片存在性进行软门控：
+
+```text
+P(flood pixel) = sigmoid(segmentation) × sigmoid(presence)
+```
+
+## 6. 训练目标与类别不平衡
+
+训练时采用以下组合：
+
+- 以 50% 正洪水瓦片为目标的分组重采样；同一瓦片的三个预见期一起采样。
+- 分割损失：Focal-BCE（`pos_weight=4`、`gamma=2`）+ Dice。
+- 边界损失：加权 BCE + Dice，权重 0.2。
+- 洪水存在性 BCE，权重 0.15。
+- AdamW、梯度累积和梯度裁剪。
+- ViT backbone 学习率 `3e-6`，时间分支及任务头学习率 `3e-5`。
+
+## 7. 推理与概率后处理
+
+正式主结果使用原始门控概率和 validation 选择的阈值 0.30。项目同时保留两种可选后处理用于概率标定诊断：
+
+| 配置 | 行为 |
+|---|---|
+| `configs/gff_vit_db_full_finetune.yaml` | 所有热度图直接使用原始概率，阈值 0.30 |
+| `configs/gff_vit_db_full_finetune_per_heatmap.yaml` | 每张有效热度图独立 min–max，阈值 0.75 |
+| `configs/gff_vit_db_full_finetune_adaptive.yaml` | `q99<0.01` 时归一化并用 0.75，否则保留原始概率并用 0.30 |
+
+自适应模式的分流门限只在 validation 上选择。Test 不参与 checkpoint、阈值或分流门限选择。
+
+## 8. 运行方式
+
+项目使用已有 conda `daily` 环境：
 
 ```powershell
 conda run -n daily python -m pip install -r requirements.txt
-conda run -n daily python scripts\download_data.py --split val --modalities MASK DEM S1RTC
-conda run -n daily python scripts\inspect_data.py --data-root data\raw --split val --limit 20
-conda run -n daily python -m src.train --config configs\e0_smoke.yaml
 ```
 
-正式消融实验使用 `configs/formal_e0.yaml`、`formal_e1.yaml`、`formal_e2.yaml`、`formal_e3.yaml`；`configs/e0.yaml` 至 `e3.yaml` 保留为更大训练预算的扩展配置。数据归档来自官方 Hugging Face 仓库，解包后目录应为 `data/raw/<split>/<modality>/*.zarr.zip`。
-
-## 实验定义
-
-- E0：event S1RTC (VV/VH)
-- E1：event S1RTC + DEM
-- E2：pre-event + event S1RTC
-- E3：pre-event + event S1RTC + DEM
-
-默认按官方 split 训练与验证；同一配置固定随机种子。`stage1_e*.yaml` 使用本地 validation 数据进行事件级留出可行性实验，`e*.yaml` 用于正式 train/val 实验。smoke 配置只验证链路，不作为竞赛指标。
-
-## 当前阶段一结果
-
-正式 train→val 的 E0/E1/E2/E3 IoU 为 0.4774/0.5066/0.5691/0.5614；test_holdout IoU 为 0.3616/0.3803/0.4941/0.4697。最优为 E2（pre-event + event SAR）。详见 `docs/第一阶段实验报告.md` 与 `outputs/formal_summary/formal_ablation.csv`。
-
-完整复现实验可运行：
+### 8.1 数据审计与测试
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\run_formal_experiments.ps1
+conda run -n daily --no-capture-output python scripts\audit_gff.py `
+  --root data\gff `
+  --output outputs\gff_data_audit.json
+
+conda run -n daily --no-capture-output python -m unittest discover -s tests -v
 ```
 
-## 初赛提交文件
+### 8.2 完整 dB-only ViT 微调
 
-生成与校验材料：
+完整配置从已选择的 dB-only 消融 checkpoint 初始化：
 
 ```powershell
-conda run -n daily python scripts\build_submission.py
-conda run -n daily python scripts\build_video.py
-conda run -n daily python scripts\validate_submission.py
+powershell -ExecutionPolicy Bypass -File scripts\run_gff_vit_db_full_finetune.ps1
 ```
 
-最终四项文件位于 `output/submission/`：参赛作品简介 PDF、项目文档 PDF、项目视频 MP4 和其他材料 ZIP。`洪析先知团队` 是当前占位团队名，正式提交前须改为报名系统中的准确团队名称，并重新运行以上脚本。
-
-## 类别不平衡与边界实验
-
-- `formal_e2_imbalance_boundary.yaml`：分洪水占比重采样 + Focal/Tversky + 边界带加权。该组合用于验证“重复正类补偿”的风险，不能默认视为改进。
-- `formal_e2_boundary_precision.yaml`：保留原始图块分布，将正类权重从 4.0 降为 2.0，并仅在五像素边界带上提高 BCE 权重，用于降低误报并改善边缘定位。
-
-## 模型结构改进
-
-`siamese_change_unet` 将 E2 的灾前、灾中双极化 SAR 分别送入共享编码器，并在四个尺度融合灾中语义特征与绝对时相差异，再由 U-Net 解码器恢复洪水边界。它与上一节的类别权重和边界带损失组合使用。
-
-固定 seed 42 的正式实验中，validation IoU 为 0.5968；562 个未见事件 holdout 图块上的 IoU/Dice/Boundary F1 为 0.5342/0.6964/0.5524，原 E2 对应为 0.4941/0.6614/0.5329。当前未继续运行其他随机种子，结果应视为单种子结构验证。
+也可以手动运行：
 
 ```powershell
-conda run -n daily python -m src.train --config configs\formal_e2_siamese_change.yaml
-conda run -n daily python scripts\evaluate_checkpoint.py --config configs\formal_e2_siamese_change.yaml --split test --sample-list data\split\impactmesh_flood_test_holdout.txt --name test_holdout
+conda run -n daily --no-capture-output python -m src.train_gff `
+  --config configs\gff_vit_db_full_finetune.yaml `
+  --init-checkpoint outputs\gff_vit_ablation_db\best.pt
 ```
 
-设计与完整对照见 `docs/模型结构改进实验报告.md`，机器可读结果见 `docs/model_structure_results.csv`。
-
-## 轻量分割模型与 SpaceNet 8 参考实验
-
-项目已在不增加 Python 依赖的前提下接入 `deeplabv3plus_mobilenet` 和原生 `segformer_b0`，并保持 seed 42、完整 train/val、12 epoch 与同一损失设置。单模型 holdout IoU 分别为 0.5130 和 0.5268，均未超过 `siamese_change_unet` 的 0.5342；SegFormer-B0 的 Boundary F1 0.5542 为单模型最高。
-
-按 SpaceNet 8 获奖方案的异构集成思路，仅在 validation 选择组合后评估一次 holdout。在该轮实验中，等权 `SiameseChangeUNet + DeepLabV3+` 的 holdout IoU 为 0.5409、Dice 为 0.7020，但正事件宏 IoU 和推理效率仍以单 Siamese 更优。
+### 8.3 重新选择 checkpoint 和阈值
 
 ```powershell
-conda run -n daily python -m src.train --config configs\formal_e2_deeplabv3plus.yaml
-conda run -n daily python -m src.train --config configs\formal_e2_segformer_b0.yaml
-conda run -n daily python scripts\evaluate_ensemble.py --configs configs\formal_e2_siamese_change.yaml configs\formal_e2_deeplabv3plus.yaml --split test --sample-list data\split\impactmesh_flood_test_holdout.txt --name test_holdout --output-dir outputs\ensemble_siamese_deeplab
+conda run -n daily --no-capture-output python scripts\select_gff_checkpoint.py `
+  --config configs\gff_vit_db_full_finetune.yaml `
+  --checkpoints `
+    outputs\gff_vit_db_full_finetune\epoch1.pt `
+    outputs\gff_vit_db_full_finetune\epoch2.pt
 ```
 
-完整分析见 `docs/轻量分割模型与SpaceNet8参考实验报告.md`。
-
-## 洪水存在性辅助头与时相 Transformer
-
-为降低无洪水图块误报，`siamese_change_unet_presence` 在 SiameseChangeUNet 瓶颈上增加图像级存在性分类头。训练时联合优化像素分割损失与图块级 BCE，推理时使用存在概率对分割概率作软门控。固定 seed 42 的正式实验取得 validation IoU 0.6114，holdout IoU/Dice/Boundary F1 为 **0.5540/0.7130/0.6016**，正洪水事件宏 IoU 为 0.3794；无洪水事件误报像素由原 E2 的 1,599 降至 1,510。
-
-同时测试了共享 MiT-B0 编码器、逐尺度时相差异融合的 `siamese_segformer_b0`。其 holdout IoU 为 0.4860，未超过普通 SegFormer-B0 和 SiameseChangeUNet，因此保留为对照而不作为主模型。validation 选出的 `presence + SiameseChangeUNet` 等权集成在 holdout 上也未超过存在性单模型，最终主候选保持为 `siamese_change_unet_presence`。
+### 8.4 生成预测图
 
 ```powershell
-conda run -n daily python -m src.train --config configs\formal_e2_siamese_presence.yaml
-conda run -n daily python scripts\evaluate_checkpoint.py --config configs\formal_e2_siamese_presence.yaml --split test --sample-list data\split\impactmesh_flood_test_holdout.txt --name test_holdout
-
-conda run -n daily python -m src.train --config configs\formal_e2_siamese_segformer.yaml
-conda run -n daily python scripts\evaluate_checkpoint.py --config configs\formal_e2_siamese_segformer.yaml --split test --sample-list data\split\impactmesh_flood_test_holdout.txt --name test_holdout
+conda run -n daily --no-capture-output python scripts\predict_gff_example.py `
+  --config configs\gff_vit_db_full_finetune.yaml `
+  --checkpoint outputs\gff_vit_db_full_finetune\best.pt `
+  --split test `
+  --horizon 3 `
+  --output outputs\gff_vit_db_full_finetune\prediction_72h.png
 ```
 
-设计、分类头诊断、集成对照与限制见 `docs/洪水存在性辅助头实验报告.md`。
+`--horizon 1/2/3` 分别表示 24/48/72h。
 
-## 模型架构二次优化
+## 9. 主要代码位置
 
-`siamese_change_unet_presence_refine` 在存在性模型上进一步加入三项结构：瓶颈处的轻量多尺度空洞上下文、由粗尺度解码特征控制的跳连注意力，以及带独立边界监督的边缘细化模块。它保留原有图块存在性软门控。
+| 路径 | 作用 |
+|---|---|
+| `src/gff_data.py` | GFF 文件读取、预处理、因果屏蔽和样本组装 |
+| `src/gff_model.py` | ViT 空间分支、时间 Transformer、FiLM 融合和多输出头 |
+| `src/train_gff.py` | 损失、采样、训练、评估和概率后处理 |
+| `scripts/download_gff.py` | 数据下载、校验与解压 |
+| `scripts/select_gff_checkpoint.py` | validation checkpoint/阈值/分流门限选择 |
+| `scripts/predict_gff_example.py` | 单样本预测和 TP/FP/FN 可视化 |
+| `scripts/rank_gff_prediction_examples.py` | 固定测试样本的定性排序 |
+| `configs/gff_vit_db_full_finetune.yaml` | 当前正式模型配置 |
+| `configs/gff_vit_db_full_finetune_adaptive.yaml` | 低置信度自适应后处理配置 |
+| `docs/GFF_SU-Net预处理消融实验报告.md` | 预处理、完整训练和后处理实验报告 |
 
-同样使用 seed 42 和 12 epochs，新模型的 validation IoU 为 0.6165；holdout IoU/Dice/Precision 为 **0.5594/0.7175/0.7041**，均为当前最高，正洪水事件宏 IoU 也提高到 0.3854。Boundary F1 为 0.5925，低于原 Presence 模型的 0.6016；无洪水事件误报为 1,775，亦高于原 Presence 的 1,510。因此按主要区域 IoU 选择新模型，边界质量或低误报优先时仍保留原 Presence 模型。
-
-```powershell
-conda run -n daily python -m src.train --config configs\formal_e2_siamese_presence_refine.yaml
-conda run -n daily python scripts\evaluate_checkpoint.py --config configs\formal_e2_siamese_presence_refine.yaml --split test --sample-list data\split\impactmesh_flood_test_holdout.txt --name test_holdout
-conda run -n daily python scripts\benchmark_checkpoint.py --configs configs\formal_e2_siamese_presence.yaml configs\formal_e2_siamese_presence_refine.yaml
-```
-
-完整结构、逐事件对照和效率分析见 `docs/模型架构二次优化实验报告.md`。
-
-## 下一次洪水预测概念验证
-
-现有 E2 模型属于灾中制图，不是未来预报。为验证“使用同一地点上一次洪灾的 pre-event/event SAR，预测下一次洪灾范围”，项目新增跨事件空间拼接数据管线和严格时间留出实验。模型输入中不包含下一次洪灾的 event 影像；目标才是下一次洪灾的真实掩膜。
-
-本地 24,578 个对齐图块中，经同一 MGRS 区域历史影像拼接和至少 95% 覆盖过滤，仅得到 458 个有效下一事件样本，按目标年份划分为 train 327（不晚于 2023）、val 35（2024）、test 96（2025–2026）。方向时相融合模型的测试 IoU 为 0.3885；预训练历史制图加未来残差为 0.4092。二者均低于“识别上一次洪水并延续到下一次”的验证集选阈值基线 0.4470。保守全模型微调的最佳权重停留在 epoch 0，也没有学到有效的未来修正。
-
-因此当前结果只能作为洪水复发空间风险概念验证，不能称为可部署的下一次洪水预报。ImpactMesh-Flood 官方定位也是 flood mapping；缺少下一次事件的降雨预报、河流水位/流量、土壤湿度和明确预见期，无法唯一确定未来淹没范围。
-
-```powershell
-conda run -n daily python scripts\audit_future_prediction_data.py
-conda run -n daily python scripts\build_future_event_manifest.py
-conda run -n daily python -m src.train --config configs\formal_future_event_forecast.yaml
-conda run -n daily python scripts\evaluate_checkpoint.py --config configs\formal_future_event_forecast.yaml --split test --name future_test
-conda run -n daily python scripts\evaluate_future_baselines.py --forecast-config configs\formal_future_event_forecast.yaml --mapping-config configs\formal_e2_siamese_presence_refine.yaml --partition test
-```
-
-完整审计、模型设计、失败对照和下一步数据要求见 `docs/下一次洪水预测可行性与实验报告.md`。
+模型 checkpoint、原始数据和实验输出默认位于 `outputs/`、`data/gff/`，不会提交到 Git 仓库。
