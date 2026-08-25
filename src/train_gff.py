@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import random
 import time
 from pathlib import Path
@@ -125,6 +126,95 @@ def normalize_probability_maps(
     return torch.where(has_range & mask, normalized.clamp(0.0, 1.0), 0.0)
 
 
+def heatmap_confidence(
+    probability: torch.Tensor,
+    valid: torch.Tensor | None = None,
+    quantile: float = 0.99,
+) -> torch.Tensor:
+    """Measure absolute heatmap confidence with a valid-pixel upper quantile."""
+
+    if not 0.0 <= quantile <= 1.0:
+        raise ValueError(f"confidence quantile must be in [0, 1], received {quantile}")
+    mask = torch.ones_like(probability, dtype=torch.bool) if valid is None else valid.bool()
+    values = []
+    for sample, sample_mask in zip(probability, mask):
+        selected = sample[sample_mask]
+        if selected.numel() == 0:
+            values.append(torch.zeros((), device=probability.device, dtype=torch.float32))
+        else:
+            upper_tail = max(
+                int(math.ceil((1.0 - quantile) * selected.numel())), 1
+            )
+            values.append(
+                torch.topk(selected.float(), upper_tail, sorted=False).values.amin()
+            )
+    return torch.stack(values).reshape(-1, 1, 1, 1)
+
+
+def postprocess_probability_maps(
+    probability: torch.Tensor,
+    valid: torch.Tensor | None = None,
+    threshold: float = 0.5,
+    postprocessing: dict | None = None,
+) -> dict[str, torch.Tensor]:
+    """Apply one consistent probability postprocessing rule before prediction."""
+
+    settings = postprocessing or {}
+    mode = str(settings.get("probability_normalization", "none"))
+    batch_size = probability.shape[0]
+    if mode == "adaptive_low_confidence_minmax":
+        statistic = str(settings.get("confidence_statistic", "valid_quantile"))
+        if statistic != "valid_quantile":
+            raise ValueError(f"Unsupported confidence statistic: {statistic}")
+        confidence = heatmap_confidence(
+            probability,
+            valid,
+            float(settings.get("confidence_quantile", 0.99)),
+        )
+        confidence_gate = float(settings.get("confidence_gate", 0.1))
+        normalized_maps = confidence < confidence_gate
+        normalized_probability = normalize_probability_maps(
+            probability, valid, "per_heatmap_minmax"
+        )
+        processed = torch.where(normalized_maps, normalized_probability, probability)
+        raw_threshold = torch.full_like(
+            confidence, float(settings.get("raw_threshold", threshold))
+        )
+        normalized_threshold = torch.full_like(
+            confidence, float(settings.get("normalized_threshold", threshold))
+        )
+        thresholds = torch.where(
+            normalized_maps, normalized_threshold, raw_threshold
+        )
+    else:
+        processed = normalize_probability_maps(probability, valid, mode)
+        normalized_maps = torch.full(
+            (batch_size, 1, 1, 1),
+            mode == "per_heatmap_minmax",
+            dtype=torch.bool,
+            device=probability.device,
+        )
+        confidence = torch.full(
+            (batch_size, 1, 1, 1),
+            float("nan"),
+            dtype=torch.float32,
+            device=probability.device,
+        )
+        thresholds = torch.full(
+            (batch_size, 1, 1, 1),
+            float(threshold),
+            dtype=processed.dtype,
+            device=processed.device,
+        )
+    return {
+        "probability": processed,
+        "prediction": processed >= thresholds,
+        "normalized": normalized_maps,
+        "confidence": confidence,
+        "threshold": thresholds,
+    }
+
+
 def confusion_metrics(counts: np.ndarray) -> dict[str, float]:
     tp, fp, fn, tn = counts.astype(np.float64)
     eps = 1e-9
@@ -198,6 +288,102 @@ def select_validation_threshold(
 
 
 @torch.no_grad()
+def select_validation_adaptive_gate(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    postprocessing: dict,
+    candidates: list[float],
+) -> tuple[float, dict[str, float], dict[str, dict[str, float]]]:
+    """Select only the raw/normalized routing gate on validation data."""
+
+    if str(postprocessing.get("probability_normalization")) != (
+        "adaptive_low_confidence_minmax"
+    ):
+        raise ValueError("adaptive gate calibration requires adaptive postprocessing")
+    if not candidates:
+        raise ValueError("At least one confidence gate candidate is required")
+    model.eval()
+    totals = {
+        gate: {horizon: np.zeros(4) for horizon in (1, 2, 3)}
+        for gate in candidates
+    }
+    normalized_samples = {
+        gate: {horizon: 0 for horizon in (1, 2, 3)} for gate in candidates
+    }
+    sample_counts = {horizon: 0 for horizon in (1, 2, 3)}
+    quantile = float(postprocessing.get("confidence_quantile", 0.99))
+    raw_threshold = float(postprocessing.get("raw_threshold", 0.3))
+    normalized_threshold = float(postprocessing.get("normalized_threshold", 0.75))
+    for batch in tqdm(loader, desc="calibrate adaptive gate", leave=False):
+        batch = move_batch(batch, device)
+        with torch.autocast(
+            device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"
+        ):
+            outputs = model(
+                batch["spatial"],
+                batch["weather"],
+                batch["horizon"],
+                batch["forecast_mask"],
+            )
+        probability = flood_probability(outputs)
+        normalized_probability = normalize_probability_maps(
+            probability, batch["valid"], "per_heatmap_minmax"
+        )
+        confidence = heatmap_confidence(probability, batch["valid"], quantile)
+        raw_prediction = probability >= raw_threshold
+        normalized_prediction = normalized_probability >= normalized_threshold
+        truth = batch["target"] >= 0.5
+        valid = batch["valid"] >= 0.5
+        for horizon in (1, 2, 3):
+            selected = batch["horizon"] == horizon
+            sample_counts[horizon] += int(selected.sum())
+            if not selected.any():
+                continue
+            target = truth[selected] & valid[selected]
+            mask = valid[selected]
+            for gate in candidates:
+                use_normalized = confidence < gate
+                prediction = torch.where(
+                    use_normalized, normalized_prediction, raw_prediction
+                )
+                pred = prediction[selected] & mask
+                totals[gate][horizon] += np.array(
+                    [
+                        (pred & target).sum().item(),
+                        (pred & ~target & mask).sum().item(),
+                        (~pred & target & mask).sum().item(),
+                        (~pred & ~target & mask).sum().item(),
+                    ]
+                )
+                normalized_samples[gate][horizon] += int(
+                    use_normalized[selected].sum()
+                )
+    scores = {
+        gate: float(
+            np.mean(
+                [confusion_metrics(counts)["iou"] for counts in by_horizon.values()]
+            )
+        )
+        for gate, by_horizon in totals.items()
+    }
+    fractions = {
+        str(gate): {
+            f"h{horizon * 24}": normalized_samples[gate][horizon]
+            / max(sample_counts[horizon], 1)
+            for horizon in (1, 2, 3)
+        }
+        for gate in candidates
+    }
+    selected_gate = max(scores, key=scores.get)
+    return (
+        float(selected_gate),
+        {str(key): value for key, value in scores.items()},
+        fractions,
+    )
+
+
+@torch.no_grad()
 def evaluate(
     model: torch.nn.Module,
     loader: DataLoader,
@@ -205,10 +391,13 @@ def evaluate(
     loss_config: dict,
     threshold: float = 0.5,
     probability_normalization: str = "none",
+    postprocessing: dict | None = None,
 ) -> tuple[float, dict[str, float]]:
     model.eval()
     totals = {1: np.zeros(4), 2: np.zeros(4), 3: np.zeros(4)}
     boundary_totals = {1: np.zeros(3), 2: np.zeros(3), 3: np.zeros(3)}
+    normalized_samples = {1: 0, 2: 0, 3: 0}
+    sample_counts = {1: 0, 2: 0, 3: 0}
     loss_sum = 0.0
     examples = 0
     for batch in tqdm(loader, desc="evaluate", leave=False):
@@ -225,21 +414,32 @@ def evaluate(
             loss = objective(outputs, batch, loss_config)
         loss_sum += float(loss) * batch["target"].shape[0]
         examples += batch["target"].shape[0]
-        probability = normalize_probability_maps(
-            flood_probability(outputs), batch["valid"], probability_normalization
+        effective_postprocessing = postprocessing or {
+            "probability_normalization": probability_normalization
+        }
+        processed = postprocess_probability_maps(
+            flood_probability(outputs),
+            batch["valid"],
+            threshold,
+            effective_postprocessing,
         )
-        boundary_probability = normalize_probability_maps(
+        processed_boundary = postprocess_probability_maps(
             torch.sigmoid(outputs["boundary"]),
             batch["valid"],
-            probability_normalization,
+            threshold,
+            effective_postprocessing,
         )
-        prediction = probability >= threshold
-        boundary_prediction = boundary_probability >= threshold
+        prediction = processed["prediction"]
+        boundary_prediction = processed_boundary["prediction"]
         target = batch["target"] >= 0.5
         boundary_target = batch["boundary"] >= 0.5
         valid = batch["valid"] >= 0.5
         for horizon in totals:
             selected = batch["horizon"] == horizon
+            sample_counts[horizon] += int(selected.sum())
+            normalized_samples[horizon] += int(
+                processed["normalized"][selected].sum()
+            )
             if not selected.any():
                 continue
             pred = prediction[selected] & valid[selected]
@@ -277,6 +477,18 @@ def evaluate(
     metrics["macro_dice"] = float(
         np.mean([metrics[f"h{horizon * 24}_dice"] for horizon in totals])
     )
+    if str(
+        (postprocessing or {}).get(
+            "probability_normalization", probability_normalization
+        )
+    ) == "adaptive_low_confidence_minmax":
+        for horizon in totals:
+            metrics[f"h{horizon * 24}_normalized_fraction"] = float(
+                normalized_samples[horizon] / max(sample_counts[horizon], 1)
+            )
+        metrics["normalized_fraction"] = float(
+            sum(normalized_samples.values()) / max(sum(sample_counts.values()), 1)
+        )
     return loss_sum / max(examples, 1), metrics
 
 
@@ -443,8 +655,9 @@ def main() -> None:
         best_iou = float(checkpoint.get("best_iou", -1.0))
 
     loss_config = config.get("loss", {})
+    postprocessing = dict(config.get("postprocessing", {}))
     probability_normalization = str(
-        config.get("postprocessing", {}).get("probability_normalization", "none")
+        postprocessing.get("probability_normalization", "none")
     )
     accumulation = int(config.get("gradient_accumulation", 1))
     rows: list[dict] = []
@@ -488,6 +701,7 @@ def main() -> None:
             loss_config,
             float(config.get("threshold", 0.5)),
             probability_normalization,
+            postprocessing,
         )
         row = {
             "epoch": epoch,
@@ -529,9 +743,29 @@ def main() -> None:
             "threshold_candidates", [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
         )
     ]
-    selected_threshold, threshold_scores = select_validation_threshold(
-        model, val_loader, device, candidates, probability_normalization
-    )
+    adaptive = probability_normalization == "adaptive_low_confidence_minmax"
+    if adaptive:
+        selected_gate, gate_scores, normalized_fractions = (
+            select_validation_adaptive_gate(
+                model,
+                val_loader,
+                device,
+                postprocessing,
+                [
+                    float(value)
+                    for value in postprocessing["confidence_gate_candidates"]
+                ],
+            )
+        )
+        postprocessing["confidence_gate"] = selected_gate
+        selected_threshold = float(postprocessing.get("raw_threshold", 0.3))
+        threshold_scores = {}
+    else:
+        selected_threshold, threshold_scores = select_validation_threshold(
+            model, val_loader, device, candidates, probability_normalization
+        )
+        gate_scores = {}
+        normalized_fractions = {}
     calibrated_val_loss, calibrated_val_metrics = evaluate(
         model,
         val_loader,
@@ -539,9 +773,19 @@ def main() -> None:
         loss_config,
         selected_threshold,
         probability_normalization,
+        postprocessing,
     )
     best_checkpoint["selected_threshold"] = selected_threshold
-    best_checkpoint["threshold_scores"] = threshold_scores
+    if adaptive:
+        best_checkpoint["selected_normalized_threshold"] = float(
+            postprocessing["normalized_threshold"]
+        )
+        best_checkpoint["selected_confidence_gate"] = float(
+            postprocessing["confidence_gate"]
+        )
+        best_checkpoint["confidence_gate_scores"] = gate_scores
+    else:
+        best_checkpoint["threshold_scores"] = threshold_scores
     torch.save(best_checkpoint, output_dir / "best.pt")
     test_dataset = make_dataset(config, "test")
     test_loader = DataLoader(test_dataset, shuffle=False, **loader_options)
@@ -552,6 +796,7 @@ def main() -> None:
         loss_config,
         selected_threshold,
         probability_normalization,
+        postprocessing,
     )
     summary = {
         "experiment_type": (
@@ -571,7 +816,17 @@ def main() -> None:
         "best_epoch": int(best_checkpoint["epoch"]),
         "checkpoint_validation_at_training_threshold": best_checkpoint["metrics"],
         "selected_threshold": selected_threshold,
+        "selected_normalized_threshold": (
+            float(postprocessing["normalized_threshold"]) if adaptive else None
+        ),
+        "selected_confidence_gate": (
+            float(postprocessing["confidence_gate"]) if adaptive else None
+        ),
+        "probability_normalization": probability_normalization,
+        "postprocessing": postprocessing,
         "threshold_validation_macro_iou": threshold_scores,
+        "confidence_gate_validation_macro_iou": gate_scores,
+        "confidence_gate_normalized_fractions": normalized_fractions,
         "validation_loss": calibrated_val_loss,
         "validation": calibrated_val_metrics,
         "test_loss": test_loss,

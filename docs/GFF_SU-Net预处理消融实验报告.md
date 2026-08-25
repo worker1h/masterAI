@@ -128,6 +128,29 @@ powershell -ExecutionPolicy Bypass -File scripts\run_gff_sunet_ablation.ps1
 - `outputs/gff_vit_db_full_finetune_per_heatmap/run.json`
 - `outputs/gff_vit_db_full_finetune_per_heatmap/best.pt`
 
+### 7.1 仅低置信度热度图归一化
+
+为避免对本来已有较高绝对概率的热度图重复拉伸，进一步加入 `adaptive_low_confidence_minmax`。每张图先在有效像素上计算第 99 百分位概率 `q99`，再按以下规则分流：
+
+- `q99 >= g`：保留原始概率，直接使用原始概率阈值 0.30；
+- `q99 < g`：该图判为整体低置信度，做逐图 min–max，再使用归一化阈值 0.75。
+
+0.30 和 0.75 分别沿用前两项实验各自在 validation 上选择的阈值；本轮只在 validation 扫描分流门限 `g`，不再联合搜索两条分支阈值。最终选择 `g=0.01`，validation/test 分别有 29.82%/28.43% 的热度图进入归一化分支，其余约 70% 直接使用原始概率。
+
+| 后处理 | Val Macro IoU | Test Macro IoU | Test Macro Dice | Test Boundary F1 | Test 归一化比例 |
+|---|---:|---:|---:|---:|---:|
+| 全部原始 | **0.058788** | 0.063220 | 0.118921 | **0.064135** | 0% |
+| 全部逐图归一化 | 0.049237 | **0.091828** | **0.168210** | 0.019376 | 100% |
+| **仅低置信度归一化** | 0.055800 | 0.068159 | 0.127619 | 0.064116 | 28.43% |
+
+自适应方案相对全部原始的 test Macro IoU 绝对提高 0.004939（相对 +7.81%），而边界 F1 基本不变；相对全部归一化，它显著恢复了边界质量，但区域 IoU 更低。更关键的是，自适应 validation IoU 仍比全部原始低 0.002988，因此不能用已经查看的 test 提升把它升级为正式主结果。它作为用户要求的可选后处理保留，当前正式选择仍是 validation 最优的全部原始概率方案。
+
+配置和结果位于：
+
+- `configs/gff_vit_db_full_finetune_adaptive.yaml`
+- `outputs/gff_vit_db_full_finetune_adaptive/run.json`
+- `outputs/gff_vit_db_full_finetune_adaptive/best.pt`
+
 ## 8. 结论边界
 
 这是一项固定小子集单随机种子消融，能够比较当前训练预算内的相对趋势，但不能替代完整 98,853 个训练瓦片和多随机种子统计。若 validation 与 test 排序不一致，应优先报告跨流域标定问题，而不能用 test 反向选择看起来最好的组。

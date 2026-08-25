@@ -54,6 +54,8 @@ powershell -ExecutionPolicy Bypass -File scripts\run_gff_sunet_ablation.ps1
 
 已增加逐热度图有效像素 min–max 归一化后再阈值化的可选后处理，validation 重新选择第 2 轮、阈值 0.75。其 validation/test Macro IoU 为 0.0492/0.0918，测试 Macro Dice 为 0.1682；同一默认 72h 漏检样例的 IoU 从 0 提高到 0.8102。由于 validation 反而低于原始概率方案，且测试边界 F1 从 0.0641 降至 0.0194，该方案只作为概率尺度漂移诊断保留，不能根据已经查看的 test 结果替换正式主结果。配置与结果见 `configs/gff_vit_db_full_finetune_per_heatmap.yaml`、`outputs/gff_vit_db_full_finetune_per_heatmap/run.json` 和 [`docs/GFF_SU-Net预处理消融实验报告.md`](docs/GFF_SU-Net预处理消融实验报告.md)。
 
+进一步实现了仅对低置信度热度图归一化的自适应方案：以有效像素 `q99` 判断整体置信度，validation 选择分流门限 0.01；约 28.43% 的 test 图使用 min–max + 0.75，其余直接使用原始概率 + 0.30。该方案 validation/test Macro IoU 为 0.0558/0.0682，Test Dice 0.1276，边界 F1 0.0641。它缓解了全部归一化造成的边界退化，但 validation 仍未超过全部原始方案的 0.0588，故保留为可选后处理。配置为 `configs/gff_vit_db_full_finetune_adaptive.yaml`。
+
 也可一键执行下载校验、数据审计、测试、smoke、正式子集训练和预测示例：
 
 ```powershell

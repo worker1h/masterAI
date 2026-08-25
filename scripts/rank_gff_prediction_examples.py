@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 import sys
 
@@ -16,7 +17,7 @@ from torch.utils.data import DataLoader, Subset
 
 from src.gff_data import WEATHER_CHANNELS
 from src.gff_model import build_gff_model
-from src.train_gff import flood_probability, make_dataset, normalize_probability_maps
+from src.train_gff import flood_probability, make_dataset, postprocess_probability_maps
 
 
 def main() -> None:
@@ -45,8 +46,13 @@ def main() -> None:
     )
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     threshold = float(checkpoint.get("selected_threshold", 0.5))
+    postprocessing = dict(config.get("postprocessing", {}))
+    if "selected_confidence_gate" in checkpoint:
+        postprocessing["confidence_gate"] = float(
+            checkpoint["selected_confidence_gate"]
+        )
     probability_normalization = str(
-        config.get("postprocessing", {}).get("probability_normalization", "none")
+        postprocessing.get("probability_normalization", "none")
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_gff_model(config, dataset.spatial_channels, WEATHER_CHANNELS)
@@ -65,12 +71,16 @@ def main() -> None:
                 batch["horizon"].to(device),
                 batch["forecast_mask"].to(device),
             )
-            probability = normalize_probability_maps(
+            processed = postprocess_probability_maps(
                 flood_probability(outputs),
                 batch["valid"].to(device),
-                probability_normalization,
+                threshold,
+                postprocessing,
             )
-            prediction = (probability >= threshold).cpu()
+            prediction = processed["prediction"].cpu()
+            normalized = processed["normalized"].cpu()
+            confidence = processed["confidence"].cpu()
+            thresholds = processed["threshold"].cpu()
             target = batch["target"] >= 0.5
             valid = batch["valid"] >= 0.5
             for local_index in range(prediction.shape[0]):
@@ -80,11 +90,21 @@ def main() -> None:
                 false_positive = int((predicted & ~observed).sum())
                 false_negative = int((~predicted & observed).sum())
                 union = true_positive + false_positive + false_negative
+                confidence_value = float(confidence[local_index].item())
                 rows.append(
                     {
                         "dataset_index": indexes[offset + local_index],
                         "site": batch["site"][local_index],
                         "horizon_hours": args.horizon * 24,
+                        "postprocessing_branch": (
+                            "normalized"
+                            if bool(normalized[local_index].item())
+                            else "raw"
+                        ),
+                        "heatmap_confidence": (
+                            confidence_value if math.isfinite(confidence_value) else None
+                        ),
+                        "threshold": float(thresholds[local_index].item()),
                         "iou": true_positive / max(union, 1),
                         "true_positive_pixels": true_positive,
                         "false_positive_pixels": false_positive,
@@ -106,6 +126,7 @@ def main() -> None:
         ),
         "threshold": threshold,
         "probability_normalization": probability_normalization,
+        "postprocessing": postprocessing,
         "evaluated_examples": len(rows),
         "positive_target_examples": len(positive_targets),
         "top_examples": positive_targets[: max(int(args.top_k), 1)],

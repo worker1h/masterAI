@@ -17,7 +17,7 @@ import yaml
 
 from src.gff_data import GFFFloodForecastDataset, WEATHER_CHANNELS
 from src.gff_model import build_gff_model
-from src.train_gff import flood_probability, normalize_probability_maps
+from src.train_gff import flood_probability, postprocess_probability_maps
 
 
 def parse_args() -> argparse.Namespace:
@@ -95,16 +95,31 @@ def main() -> None:
             sample["forecast_mask"][None].to(device),
         )
     raw_probability = flood_probability(outputs)
+    postprocessing = dict(config.get("postprocessing", {}))
+    if "selected_confidence_gate" in checkpoint:
+        postprocessing["confidence_gate"] = float(
+            checkpoint["selected_confidence_gate"]
+        )
     probability_normalization = str(
-        config.get("postprocessing", {}).get("probability_normalization", "none")
+        postprocessing.get("probability_normalization", "none")
     )
-    normalized_probability = normalize_probability_maps(
+    if args.threshold is not None and probability_normalization == (
+        "adaptive_low_confidence_minmax"
+    ):
+        postprocessing["raw_threshold"] = float(args.threshold)
+        postprocessing["normalized_threshold"] = float(args.threshold)
+    processed = postprocess_probability_maps(
         raw_probability,
         sample["valid"][None].to(device),
-        probability_normalization,
+        threshold,
+        postprocessing,
     )
-    probability = normalized_probability[0, 0].cpu().float().numpy()
-    prediction = probability >= threshold
+    probability = processed["probability"][0, 0].cpu().float().numpy()
+    prediction = processed["prediction"][0, 0].cpu().numpy()
+    was_normalized = bool(processed["normalized"][0].item())
+    effective_threshold = float(processed["threshold"][0].item())
+    confidence_value = float(processed["confidence"][0].item())
+    confidence = confidence_value if np.isfinite(confidence_value) else None
     target = sample["target"][0].numpy() >= 0.5
     valid = sample["valid"][0].numpy() >= 0.5
     true_positive = prediction & target & valid
@@ -146,11 +161,16 @@ def main() -> None:
     axes[probability_axis].contour(
         prediction, levels=[0.5], colors="cyan", linewidths=0.6
     )
-    probability_title = (
-        "Normalized probability"
-        if probability_normalization == "per_heatmap_minmax"
-        else "Forecast probability"
-    )
+    if probability_normalization == "adaptive_low_confidence_minmax":
+        probability_title = (
+            "Normalized probability (low confidence)"
+            if was_normalized
+            else "Raw forecast probability (high confidence)"
+        )
+    elif probability_normalization == "per_heatmap_minmax":
+        probability_title = "Normalized probability"
+    else:
+        probability_title = "Forecast probability"
     axes[probability_axis].set_title(
         f"{probability_title} ({args.horizon * 24} h)"
     )
@@ -175,8 +195,12 @@ def main() -> None:
         "site": sample["site"],
         "dataset_index": index,
         "horizon_hours": args.horizon * 24,
-        "threshold": threshold,
+        "threshold": effective_threshold,
         "probability_normalization": probability_normalization,
+        "postprocessing_branch": "normalized" if was_normalized else "raw",
+        "heatmap_confidence": confidence,
+        "confidence_gate": postprocessing.get("confidence_gate"),
+        "confidence_quantile": postprocessing.get("confidence_quantile"),
         "raw_probability_min": float(raw_probability.min().cpu()),
         "raw_probability_max": float(raw_probability.max().cpu()),
         "iou": tp / max(tp + fp + fn, 1),

@@ -12,7 +12,13 @@ from src.gff_data import (
     sunet_sar_variant,
 )
 from src.gff_model import GFFHorizonFormer, GFFViTHorizonFormer
-from src.train_gff import balanced_sampler, normalize_probability_maps, objective
+from src.train_gff import (
+    balanced_sampler,
+    heatmap_confidence,
+    normalize_probability_maps,
+    objective,
+    postprocess_probability_maps,
+)
 
 
 class GFFPipelineTests(unittest.TestCase):
@@ -43,6 +49,51 @@ class GFFPipelineTests(unittest.TestCase):
         self.assertIs(normalize_probability_maps(probability), probability)
         with self.assertRaises(ValueError):
             normalize_probability_maps(probability, valid, "unknown")
+
+    def test_only_low_confidence_heatmaps_are_normalized(self):
+        probability = torch.tensor(
+            [
+                [[[0.01, 0.02], [0.03, 0.04]]],
+                [[[0.10, 0.20], [0.60, 0.80]]],
+            ]
+        )
+        valid = torch.ones_like(probability, dtype=torch.bool)
+        settings = {
+            "probability_normalization": "adaptive_low_confidence_minmax",
+            "confidence_quantile": 1.0,
+            "confidence_gate": 0.1,
+            "raw_threshold": 0.5,
+            "normalized_threshold": 0.75,
+        }
+        result = postprocess_probability_maps(
+            probability, valid, 0.5, settings
+        )
+        self.assertEqual(result["normalized"].flatten().tolist(), [True, False])
+        torch.testing.assert_close(
+            result["probability"][0],
+            torch.tensor([[[0.0, 1.0 / 3.0], [2.0 / 3.0, 1.0]]]),
+        )
+        torch.testing.assert_close(result["probability"][1], probability[1])
+        self.assertEqual(result["threshold"].flatten().tolist(), [0.75, 0.5])
+        self.assertEqual(
+            result["prediction"].flatten().tolist(),
+            [False, False, False, True, False, False, True, True],
+        )
+        torch.testing.assert_close(
+            heatmap_confidence(probability, valid, 1.0).flatten(),
+            torch.tensor([0.04, 0.8]),
+        )
+        with self.assertRaises(ValueError):
+            heatmap_confidence(probability, valid, 1.1)
+        with self.assertRaises(ValueError):
+            postprocess_probability_maps(
+                probability,
+                valid,
+                postprocessing={
+                    **settings,
+                    "confidence_statistic": "mean",
+                },
+            )
 
     def test_balanced_sampler_groups_all_horizons_per_tile(self):
         class DummyDataset:

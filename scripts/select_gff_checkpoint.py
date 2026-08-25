@@ -22,6 +22,7 @@ from src.train_gff import (
     evaluate,
     make_dataset,
     seed_everything,
+    select_validation_adaptive_gate,
     select_validation_threshold,
 )
 
@@ -41,9 +42,11 @@ def main() -> None:
     output_dir = Path(config["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = args.output or output_dir / "best.pt"
+    postprocessing = dict(config.get("postprocessing", {}))
     probability_normalization = str(
-        config.get("postprocessing", {}).get("probability_normalization", "none")
+        postprocessing.get("probability_normalization", "none")
     )
+    adaptive = probability_normalization == "adaptive_low_confidence_minmax"
     workers = int(config.get("num_workers", 0))
     loader_options = {
         "batch_size": int(config["batch_size"]),
@@ -67,20 +70,41 @@ def main() -> None:
         path = Path(value)
         state = torch.load(path, map_location="cpu", weights_only=False)
         model.load_state_dict(state["model"])
-        threshold, scores = select_validation_threshold(
-            model,
-            validation_loader,
-            device,
-            candidates,
-            probability_normalization,
-        )
-        item = {
-            "checkpoint": str(path),
-            "epoch": int(state["epoch"]),
-            "selected_threshold": threshold,
-            "validation_macro_iou": float(scores[str(threshold)]),
-            "threshold_scores": scores,
-        }
+        if adaptive:
+            gate, scores, fractions = select_validation_adaptive_gate(
+                model,
+                validation_loader,
+                device,
+                postprocessing,
+                [float(value) for value in postprocessing["confidence_gate_candidates"]],
+            )
+            item = {
+                "checkpoint": str(path),
+                "epoch": int(state["epoch"]),
+                "selected_confidence_gate": gate,
+                "raw_threshold": float(postprocessing.get("raw_threshold", 0.3)),
+                "normalized_threshold": float(
+                    postprocessing.get("normalized_threshold", 0.75)
+                ),
+                "validation_macro_iou": float(scores[str(gate)]),
+                "confidence_gate_scores": scores,
+                "normalized_fractions": fractions,
+            }
+        else:
+            threshold, scores = select_validation_threshold(
+                model,
+                validation_loader,
+                device,
+                candidates,
+                probability_normalization,
+            )
+            item = {
+                "checkpoint": str(path),
+                "epoch": int(state["epoch"]),
+                "selected_threshold": threshold,
+                "validation_macro_iou": float(scores[str(threshold)]),
+                "threshold_scores": scores,
+            }
         ranking.append(item)
         checkpoints[str(path)] = state
         print(json.dumps(item, ensure_ascii=False))
@@ -88,7 +112,14 @@ def main() -> None:
     winner = ranking[0]
     state = checkpoints[winner["checkpoint"]]
     model.load_state_dict(state["model"])
-    threshold = float(winner["selected_threshold"])
+    effective_postprocessing = dict(postprocessing)
+    if adaptive:
+        effective_postprocessing["confidence_gate"] = float(
+            winner["selected_confidence_gate"]
+        )
+        threshold = float(effective_postprocessing.get("raw_threshold", 0.3))
+    else:
+        threshold = float(winner["selected_threshold"])
     validation_loss, validation_metrics = evaluate(
         model,
         validation_loader,
@@ -96,6 +127,7 @@ def main() -> None:
         config.get("loss", {}),
         threshold,
         probability_normalization,
+        effective_postprocessing,
     )
     test_dataset = make_dataset(config, "test")
     test_loader = DataLoader(test_dataset, shuffle=False, **loader_options)
@@ -106,9 +138,19 @@ def main() -> None:
         config.get("loss", {}),
         threshold,
         probability_normalization,
+        effective_postprocessing,
     )
     state["selected_threshold"] = threshold
-    state["threshold_scores"] = winner["threshold_scores"]
+    if adaptive:
+        state["selected_normalized_threshold"] = float(
+            effective_postprocessing["normalized_threshold"]
+        )
+        state["selected_confidence_gate"] = float(
+            effective_postprocessing["confidence_gate"]
+        )
+        state["confidence_gate_scores"] = winner["confidence_gate_scores"]
+    else:
+        state["threshold_scores"] = winner["threshold_scores"]
     state["validation_metrics"] = validation_metrics
     state["test_metrics"] = test_metrics
     torch.save(state, output_path)
@@ -132,8 +174,25 @@ def main() -> None:
         "best_epoch": int(state["epoch"]),
         "checkpoint_validation_at_training_threshold": state.get("metrics", {}),
         "selected_threshold": threshold,
+        "selected_normalized_threshold": (
+            float(effective_postprocessing["normalized_threshold"])
+            if adaptive
+            else None
+        ),
+        "selected_confidence_gate": (
+            float(effective_postprocessing["confidence_gate"])
+            if adaptive
+            else None
+        ),
         "probability_normalization": probability_normalization,
-        "threshold_validation_macro_iou": winner["threshold_scores"],
+        "postprocessing": effective_postprocessing,
+        "threshold_validation_macro_iou": winner.get("threshold_scores", {}),
+        "confidence_gate_validation_macro_iou": winner.get(
+            "confidence_gate_scores", {}
+        ),
+        "confidence_gate_normalized_fractions": winner.get(
+            "normalized_fractions", {}
+        ),
         "checkpoint_ranking": ranking,
         "validation_loss": validation_loss,
         "validation": validation_metrics,
