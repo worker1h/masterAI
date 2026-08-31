@@ -2,6 +2,7 @@
 data/raw/
 data/gff/
 outputs/
+weights/
 output/
 tmp/
 __pycache__/

@@ -241,7 +241,29 @@ P(flood pixel) = sigmoid(segmentation) × sigmoid(presence)
 conda run -n daily python -m pip install -r requirements.txt
 ```
 
-### 8.1 数据审计与测试
+### 8.1 图形化推理界面
+
+面向其他用户的完整数据目录、文件字段与校验方式见
+[`docs/推理数据格式说明.md`](docs/推理数据格式说明.md)。标准版与自适应后处理版
+正式权重作为 GitHub Release `inference-v1.0.0` 的附件发布；克隆仓库后请从 Release
+下载到本地 `weights/` 目录：
+
+```powershell
+git clone https://github.com/worker1h/masterAI.git
+```
+
+```powershell
+conda run -n daily --no-capture-output python scripts\run_inference_ui.py
+```
+
+界面依次选择训练产生的 `.pt/.pth/.ckpt` 权重和 GFF `rois` 目录中的
+Sentinel-1 GeoTIFF（文件名通常以 `-s1.tif` 结尾），程序会自动识别 train/val/test
+数据划分；再选择 24/48/72 小时
+预测时效并点击“开始预测”。程序会根据该图像自动读取同一场景的 DEM、HAND、
+ERA5、ERA5-Land 和 GloFAS 配套输入。一个场景含多个空间瓦片时，可用“场景瓦片”
+切换预测区域。保存结果会同时生成组合预览 PNG、二值掩膜 PNG 和推理元数据 JSON。
+
+### 8.2 数据审计与测试
 
 ```powershell
 conda run -n daily --no-capture-output python scripts\audit_gff.py `
